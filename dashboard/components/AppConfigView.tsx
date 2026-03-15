@@ -51,8 +51,8 @@ const AppConfigView: React.FC<AppConfigViewProps> = ({ config, onUpdate, onBack 
     { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini (OpenRouter)' },
     { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet (OpenRouter)' },
     { id: 'anthropic/claude-3-haiku', name: 'Claude 3 Haiku (OpenRouter)' },
-    { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash (OpenRouter)' },
-    { id: 'google/gemini-1.5-pro', name: 'Gemini 1.5 Pro (OpenRouter)' },
+    { id: 'google/gemini-flash-1.5', name: 'Gemini 1.5 Flash (OpenRouter)' },
+    { id: 'google/gemini-pro-1.5', name: 'Gemini 1.5 Pro (OpenRouter)' },
     { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3.2 (OpenRouter)' },
     { id: 'minimax/minimax-01', name: 'MiniMax M2.5 (OpenRouter)' }
   ];

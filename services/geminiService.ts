@@ -173,6 +173,38 @@ Check for:
 Output ONLY a JSON object with "thought" (design findings) and "files" (only if changes are needed).`;
 
 export class GeminiService implements AIProvider {
+  private static readonly OPENROUTER_INPUT_CHAR_LIMIT = 120_000;
+
+  private truncateForOpenRouter(input: string): string {
+    if (input.length <= GeminiService.OPENROUTER_INPUT_CHAR_LIMIT) {
+      return input;
+    }
+
+    const keepChars = GeminiService.OPENROUTER_INPUT_CHAR_LIMIT;
+    const headChars = Math.floor(keepChars * 0.65);
+    const tailChars = keepChars - headChars;
+    const head = input.slice(0, headChars);
+    const tail = input.slice(-tailChars);
+
+    return `${head}\n\n...[TRUNCATED FOR OPENROUTER: request exceeded ${GeminiService.OPENROUTER_INPUT_CHAR_LIMIT} characters]...\n\n${tail}`;
+  }
+
+  private extractOpenRouterStatus(error: unknown): number | null {
+    const message = error instanceof Error ? error.message : String(error || '');
+    const match = message.match(/OpenRouter error:\s*(\d{3})/i);
+    return match ? Number(match[1]) : null;
+  }
+
+  private isRetryableOpenRouterStatus(status: number | null): boolean {
+    if (!status) return false;
+    return status === 429 || status >= 500;
+  }
+
+  private hasGeminiDirectKey(): boolean {
+    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    return !!key && key !== 'undefined';
+  }
+
   private extractBalancedJsonBlock(input: string): string | null {
     const start = input.indexOf('{');
     if (start === -1) return null;
@@ -327,7 +359,26 @@ export class GeminiService implements AIProvider {
     }
 
     if (this.isOpenRouterModel(modelName)) {
-      return this.callPhaseWithOpenRouter(modelName, systemInstruction, input, retries);
+      try {
+        const trimmedInput = this.truncateForOpenRouter(input);
+        return await this.callPhaseWithOpenRouter(modelName, systemInstruction, trimmedInput, retries);
+      } catch (error) {
+        const status = this.extractOpenRouterStatus(error);
+        const shouldFallbackToGemini = this.isRetryableOpenRouterStatus(status) && this.hasGeminiDirectKey();
+
+        if (!shouldFallbackToGemini) {
+          throw error;
+        }
+
+        const fallbackModel = 'gemini-3-flash-preview';
+        Logger.warn(
+          `OpenRouter failed with status ${status}. Falling back to ${fallbackModel}.`,
+          { component: 'GeminiService', model: modelName, phase },
+          error
+        );
+
+        return this.callPhase(phase, input, fallbackModel, retries);
+      }
     }
 
     const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
@@ -364,14 +415,22 @@ export class GeminiService implements AIProvider {
 
   private async callPhaseWithOpenRouter(model: string, system: string, prompt: string, retries: number = 3): Promise<any> {
     // @ts-ignore
-    const key = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_OPENROUTER_API_KEY) || (typeof process !== 'undefined' && (process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY));
+    let key = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_OPENROUTER_API_KEY) || (typeof process !== 'undefined' && (process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY));
     if (!key) throw new Error("OpenRouter API key not found. Please set VITE_OPENROUTER_API_KEY.");
+    
+    // Strip any accidental quotes from the key
+    key = key.replace(/^["']|["']$/g, '').trim();
+    
+    if (!key.startsWith('sk-or-v1-')) throw new Error("Invalid OpenRouter API Key format. OpenRouter keys must start with 'sk-or-v1-'. Please check your API key settings.");
 
     let lastError;
     for (let attempt = 1; attempt <= retries; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 45_000);
       try {
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
+          signal: controller.signal,
           headers: {
             'Authorization': `Bearer ${key}`,
             'Content-Type': 'application/json',
@@ -381,8 +440,7 @@ export class GeminiService implements AIProvider {
           body: JSON.stringify({
             model: model,
             messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: prompt }
+              { role: 'user', content: `${system}\n\nUser Request:\n${prompt}` }
             ],
             temperature: 0.1
           })
@@ -404,6 +462,8 @@ export class GeminiService implements AIProvider {
           const delay = Math.pow(2, attempt) * 1000;
           await new Promise(resolve => setTimeout(resolve, delay));
         }
+      } finally {
+        clearTimeout(timeout);
       }
     }
     throw new Error(`OpenRouter API failed after ${retries} attempts: ${lastError?.message}`);
